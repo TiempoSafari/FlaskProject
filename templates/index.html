@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZIPC状态变迁矩阵生成工具</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: '#1677ff',
+            secondary: '#6b7280',
+            success: '#52c41a',
+            warning: '#faad14',
+            danger: '#ff4d4f',
+          },
+        }
+      }
+    }
+  </script>
+</head>
+
+<body class="bg-gray-50 min-h-screen">
+
+<header class="bg-white shadow-sm sticky top-0 z-50">
+  <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+    <div class="flex items-center gap-2">
+      <i class="fa fa-cubes text-primary text-xl"></i>
+      <h1 class="text-xl font-semibold">ZIPC状态变迁矩阵生成工具</h1>
+    </div>
+    <div class="text-sm text-secondary">
+      Python Flask · 百炼 API
+    </div>
+  </div>
+</header>
+
+<main class="container mx-auto px-4 py-6">
+
+  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+    <!-- 左侧：需求输入 -->
+    <div class="bg-white rounded-lg shadow-sm p-5">
+      <h2 class="text-lg font-medium mb-4">
+        <i class="fa fa-file-text-o text-primary mr-2"></i>需求文档输入
+      </h2>
+
+      <textarea id="requirementDoc"
+        class="w-full h-64 border rounded-md p-3 font-mono text-sm"
+        placeholder="粘贴 ZIPC 相关需求文档，越清晰越好..."></textarea>
+
+      <div class="mt-4">
+        <label class="text-sm text-secondary">Temperature</label>
+        <input id="temperature" type="number" step="0.1" value="0.2"
+               class="w-full border rounded-md px-3 py-2">
+      </div>
+
+      <button id="generateMatrix"
+        class="w-full mt-4 bg-primary text-white py-2 rounded-md hover:bg-primary/90">
+        <i class="fa fa-magic mr-1"></i>生成状态变迁矩阵
+      </button>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
+        <button id="saveMatrix"
+          class="w-full bg-success text-white py-2 rounded-md hover:bg-success/90">
+          <i class="fa fa-save mr-1"></i>保存 JSON
+        </button>
+
+        <button id="exportZipc"
+          class="w-full bg-warning text-white py-2 rounded-md hover:bg-warning/90">
+          <i class="fa fa-download mr-1"></i>导出 ZIPC TXT
+        </button>
+      </div>
+    </div>
+
+    <!-- 右侧：矩阵展示 -->
+    <div class="bg-white rounded-lg shadow-sm p-5">
+      <h2 class="text-lg font-medium mb-4">
+        <i class="fa fa-table text-primary mr-2"></i>状态转移矩阵（ZIPC 视图）
+      </h2>
+
+      <div id="loading" class="hidden text-center py-10">
+        <i class="fa fa-spinner fa-spin text-primary text-2xl"></i>
+        <p class="mt-2">正在生成...</p>
+      </div>
+
+      <div id="resultContainer" class="text-secondary text-center py-10">
+        点击左侧按钮生成矩阵
+      </div>
+    </div>
+
+  </div>
+
+  <!-- 人工 ZIPC 输入 -->
+  <div class="bg-white rounded-lg shadow-sm p-5 mt-6">
+    <h2 class="text-lg font-medium mb-4">
+      <i class="fa fa-pencil text-primary mr-2"></i>人工录入 ZIPC（JSON）
+    </h2>
+
+    <textarea id="zipcMatrix"
+      class="w-full h-80 border rounded-md p-3 font-mono text-sm"
+      placeholder="生成后会自动填充，可人工修改"></textarea>
+
+    <div class="text-xs text-secondary mt-2">
+      提示：这里的 JSON 会作为 “保存 / 导出” 的输入源（即你修改后可以直接保存与导出）。
+    </div>
+  </div>
+
+</main>
+
+<footer class="text-center text-sm text-secondary py-4">
+  ZIPC 状态机建模辅助工具
+</footer>
+
+<script>
+const requirementDoc = document.getElementById('requirementDoc');
+const temperature = document.getElementById('temperature');
+const generateMatrix = document.getElementById('generateMatrix');
+const saveMatrix = document.getElementById('saveMatrix');
+const exportZipc = document.getElementById('exportZipc');
+
+const loading = document.getElementById('loading');
+const resultContainer = document.getElementById('resultContainer');
+const zipcMatrix = document.getElementById('zipcMatrix');
+
+function showError(msg) {
+  resultContainer.innerHTML = `<div class="text-danger text-center">${msg}</div>`;
+}
+
+function getMatrixFromTextarea() {
+  const txt = zipcMatrix.value.trim();
+  if (!txt) throw new Error("请先生成或粘贴 JSON");
+  return JSON.parse(txt);
+}
+
+/* 生成按钮 */
+generateMatrix.onclick = async () => {
+  if (!requirementDoc.value.trim()) {
+    alert('请输入需求文档');
+    return;
+  }
+
+  loading.classList.remove('hidden');
+  resultContainer.innerHTML = '';
+
+  try {
+    const res = await fetch('/api/generate-matrix', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        requirementDoc: requirementDoc.value,
+        temperature: temperature.value
+      })
+    });
+
+    const result = await res.json();
+    if (result.code !== 200) throw new Error(result.msg);
+
+    // ✅ 修复点：后端 data 已经是对象，不要 JSON.parse
+    const matrix = result.data;
+
+    renderMatrix(matrix);
+    zipcMatrix.value = JSON.stringify(matrix, null, 2);
+
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    loading.classList.add('hidden');
+  }
+};
+
+/* 保存 JSON */
+saveMatrix.onclick = async () => {
+  try {
+    const matrix = getMatrixFromTextarea();
+
+    const res = await fetch('/api/save-matrix', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(matrix)
+    });
+    const result = await res.json();
+    if (result.code !== 200) throw new Error(result.msg);
+
+    alert("保存成功：zipc_matrix.json");
+  } catch (e) {
+    alert("保存失败：" + e.message);
+  }
+};
+
+/* 导出 ZIPC TXT */
+exportZipc.onclick = async () => {
+  try {
+    const matrix = getMatrixFromTextarea();
+
+    const res = await fetch('/api/export-zipc', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(matrix)
+    });
+
+    // 成功时后端返回 txt 文件流；失败时返回 JSON
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const result = await res.json();
+      throw new Error(result.msg || "导出失败");
+    }
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'zipc_state_machine.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+
+  } catch (e) {
+    alert("导出失败：" + e.message);
+  }
+};
+
+/* 渲染：ZIPC 状态转移矩阵 */
+function renderMatrix(matrix) {
+  const { states, events, transitions } = matrix;
+
+  const map = {};
+  (transitions || []).forEach(t => {
+    const k = `${t.event}__${t.from}`;
+    if (map[k]) console.warn("重复迁移：", k, map[k], t);
+    map[k] = t;
+  });
+
+  let html = `
+    <div class="overflow-x-auto">
+    <table class="min-w-full border text-sm">
+      <thead>
+        <tr>
+          <th class="border px-3 py-2 bg-gray-50">事件 \\ 状态</th>
+          ${(states || []).map(s =>
+            `<th class="border px-3 py-2 bg-gray-50">${escapeHtml(s)}</th>`
+          ).join('')}
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  (events || []).forEach(e => {
+    html += `<tr>
+      <td class="border px-3 py-2 font-medium bg-gray-50">${escapeHtml(e)}</td>`;
+
+    (states || []).forEach(s => {
+      const t = map[`${e}__${s}`];
+      if (!t) {
+        html += `<td class="border px-3 py-2 text-center text-gray-400">/</td>`;
+      } else {
+        const act = (t.actions && t.actions.length) ? `${t.actions.join(' + ')} → ` : '';
+        html += `<td class="border px-3 py-2 text-primary">${escapeHtml(act + t.to)}</td>`;
+      }
+    });
+
+    html += `</tr>`;
+  });
+
+  html += `</tbody></table></div>`;
+  resultContainer.innerHTML = html;
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (m) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
+  }[m]));
+}
+</script>
+
+</body>
+</html>
