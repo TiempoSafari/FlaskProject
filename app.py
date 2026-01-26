@@ -14,6 +14,7 @@ from zipc_exporter import (
     normalize_transitions,
     expand_wildcards,
 )
+from rag import get_rag_index, build_rag_context
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -63,6 +64,9 @@ def generate_matrix():
         api_endpoint = app.config.get('DASHSCOPE_API_ENDPOINT')
         default_model = app.config.get('DEFAULT_MODEL')
         default_temperature = app.config.get('DEFAULT_TEMPERATURE', 0.2)
+        rag_index_dir = app.config.get('RAG_INDEX_DIR')
+        rag_top_k = app.config.get('RAG_TOP_K', 6)
+        rag_min_score = app.config.get('RAG_MIN_SCORE', 0.12)
 
         if not api_key:
             return jsonify({"code": 400, "msg": "未配置百炼API Key"}), 400
@@ -87,7 +91,19 @@ def generate_matrix():
             f"temperature={temperature} | requirement_len={len(requirement_doc)}"
         )
 
-        # 3) Prompt（保持你原思路，但明确 actions 结构）
+        # 3) RAG 检索
+        rag_context = ""
+        rag_index = get_rag_index(rag_index_dir) if rag_index_dir else None
+        if rag_index:
+            rag_results = rag_index.retrieve(requirement_doc, rag_top_k, rag_min_score)
+            rag_context = build_rag_context(rag_results)
+            logger.info(f"[{req_id}] rag_hits={len(rag_results)}")
+            if rag_context:
+                logger.info(f"[{req_id}] rag_context begin >>>\n{rag_context}\n<<< rag_context end")
+        else:
+            logger.info(f"[{req_id}] rag index not loaded: {rag_index_dir}")
+
+        # 4) Prompt（保持你原思路，但明确 actions 结构）
         json_prompt = f"""
 你是工业控制系统的状态机建模工程师。
 
@@ -129,9 +145,14 @@ def generate_matrix():
 - 不要生成未定义的状态/事件/动作
 - states/events 不能为空
 
+【参考资料（优先遵循规范，其次参考样例）】
+{rag_context}
+
 【需求文档】
 {requirement_doc}
 """.strip()
+
+        logger.info(f"[{req_id}] prompt begin >>>\n{json_prompt}\n<<< prompt end")
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -152,7 +173,7 @@ def generate_matrix():
             }
         }
 
-        # 4) 调用模型
+        # 5) 调用模型
         response = requests.post(
             api_endpoint,
             headers=headers,
@@ -166,7 +187,7 @@ def generate_matrix():
         # ✅ 控制台打印大模型原始输出（你要求的）
         logger.info(f"[{req_id}] LLM raw output begin >>>\n{raw_text}\n<<< LLM raw output end")
 
-        # 5) 解析 JSON
+        # 6) 解析 JSON
         extracted = _extract_json_object(raw_text)
         stm_json = json.loads(extracted)
 
@@ -177,14 +198,14 @@ def generate_matrix():
             f"| actions={len((stm_json.get('actions') or {}))}"
         )
 
-        # 6) ✅ 先展开通配符（修复 from='*'）
+        # 7) ✅ 先展开通配符（修复 from='*'）
         before_expand = len(stm_json.get("transitions") or [])
         stm_json = expand_wildcards(stm_json)
         after_expand = len(stm_json.get("transitions") or [])
         if after_expand != before_expand:
             logger.warning(f"[{req_id}] transitions expanded (wildcards): {before_expand} -> {after_expand}")
 
-        # 7) ✅ 再去重/冲突处理
+        # 8) ✅ 再去重/冲突处理
         before_norm = len(stm_json.get("transitions") or [])
         stm_json = normalize_transitions(stm_json)
         after_norm = len(stm_json.get("transitions") or [])
@@ -197,7 +218,7 @@ def generate_matrix():
             for w in stm_json["_normalize_warnings"]:
                 logger.warning(f"[{req_id}]  - {w}")
 
-        # 8) 校验（不会再因 '*' 报错）
+        # 9) 校验（不会再因 '*' 报错）
         validate_model_json(stm_json)
 
         logger.info(f"[{req_id}] /api/generate-matrix SUCCESS")

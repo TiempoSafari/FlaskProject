@@ -11,6 +11,9 @@ class Config:
     DASHSCOPE_API_ENDPOINT = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     DEFAULT_MODEL = "qwen-turbo"
     DEFAULT_TEMPERATURE = 0.2
+    RAG_INDEX_DIR = os.getenv("RAG_INDEX_DIR", "data/rag_index")
+    RAG_TOP_K = int(os.getenv("RAG_TOP_K", "6"))
+    RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.12"))
 
     # Flask配置
     DEBUG = True  # 开发环境开启调试
