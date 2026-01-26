@@ -98,6 +98,8 @@ def generate_matrix():
             rag_results = rag_index.retrieve(requirement_doc, rag_top_k, rag_min_score)
             rag_context = build_rag_context(rag_results)
             logger.info(f"[{req_id}] rag_hits={len(rag_results)}")
+            if rag_context:
+                logger.info(f"[{req_id}] rag_context begin >>>\n{rag_context}\n<<< rag_context end")
         else:
             logger.info(f"[{req_id}] rag index not loaded: {rag_index_dir}")
 
@@ -149,6 +151,8 @@ def generate_matrix():
 【需求文档】
 {requirement_doc}
 """.strip()
+
+        logger.info(f"[{req_id}] prompt begin >>>\n{json_prompt}\n<<< prompt end")
 
         headers = {
             "Authorization": f"Bearer {api_key}",
