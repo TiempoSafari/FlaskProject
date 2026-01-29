@@ -14,6 +14,7 @@ from zipc_exporter import (
     normalize_transitions,
     expand_wildcards,
 )
+from seat_pipeline import run_full_pipeline
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -70,43 +71,16 @@ def _is_seat_jsonc(model_json: dict) -> bool:
     return False
 
 
-@app.route('/api/generate-matrix', methods=['POST'])
-def generate_matrix():
-    req_id = uuid.uuid4().hex[:8]
-    started = datetime.now().isoformat(timespec="seconds")
+def _generate_seat_jsonc(requirement_doc: str, model_name: str, temperature: float) -> dict:
+    api_key = app.config.get('DASHSCOPE_API_KEY')
+    api_endpoint = app.config.get('DASHSCOPE_API_ENDPOINT')
 
-    try:
-        # 1) 配置
-        api_key = app.config.get('DASHSCOPE_API_KEY')
-        api_endpoint = app.config.get('DASHSCOPE_API_ENDPOINT')
-        default_model = app.config.get('DEFAULT_MODEL')
-        default_temperature = app.config.get('DEFAULT_TEMPERATURE', 0.2)
+    if not api_key:
+        raise ValueError("未配置百炼API Key")
+    if not api_endpoint:
+        raise ValueError("未配置百炼API Endpoint")
 
-        if not api_key:
-            return jsonify({"code": 400, "msg": "未配置百炼API Key"}), 400
-        if not api_endpoint:
-            return jsonify({"code": 400, "msg": "未配置百炼API Endpoint"}), 400
-
-        # 2) 请求体
-        data = request.get_json(silent=True) or {}
-        requirement_doc = (data.get('requirementDoc') or '').strip()
-        model_name = data.get('modelName', default_model)
-
-        try:
-            temperature = float(data.get('temperature', default_temperature))
-        except Exception:
-            temperature = float(default_temperature)
-
-        if not requirement_doc:
-            return jsonify({"code": 400, "msg": "需求文档不能为空"}), 400
-
-        logger.info(
-            f"[{req_id}] /api/generate-matrix START at {started} | model={model_name} | "
-            f"temperature={temperature} | requirement_len={len(requirement_doc)}"
-        )
-
-        # 3) Prompt（SEAT JSONC 结构）
-        json_prompt = f"""
+    json_prompt = f"""
 你是工业控制系统的状态机建模工程师。
 
 你的任务是：
@@ -430,42 +404,75 @@ SEAT模型建模后自动门系统的完整需求文档
 {requirement_doc}
 """.strip()
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json; charset=utf-8"
-        }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json; charset=utf-8"
+    }
 
-        payload = {
-            "model": model_name,
-            "input": {
-                "messages": [
-                    {"role": "system", "content": "你是状态机建模工程师，仅输出 JSONC"},
-                    {"role": "user", "content": json_prompt}
-                ]
-            },
-            "parameters": {
-                "temperature": temperature,
-                "max_tokens": 3000
-            }
+    payload = {
+        "model": model_name,
+        "input": {
+            "messages": [
+                {"role": "system", "content": "你是状态机建模工程师，仅输出 JSONC"},
+                {"role": "user", "content": json_prompt}
+            ]
+        },
+        "parameters": {
+            "temperature": temperature,
+            "max_tokens": 3000
         }
+    }
 
-        # 4) 调用模型
-        response = requests.post(
-            api_endpoint,
-            headers=headers,
-            json=payload,
-            timeout=60
+    response = requests.post(
+        api_endpoint,
+        headers=headers,
+        json=payload,
+        timeout=60
+    )
+    response.raise_for_status()
+
+    raw_text = (response.json().get("output", {}).get("text") or "").strip()
+    extracted = _extract_json_object(raw_text)
+    return json.loads(_strip_jsonc_comments(extracted))
+
+
+@app.route('/api/generate-matrix', methods=['POST'])
+def generate_matrix():
+    req_id = uuid.uuid4().hex[:8]
+    started = datetime.now().isoformat(timespec="seconds")
+
+    try:
+        # 1) 配置
+        api_key = app.config.get('DASHSCOPE_API_KEY')
+        api_endpoint = app.config.get('DASHSCOPE_API_ENDPOINT')
+        default_model = app.config.get('DEFAULT_MODEL')
+        default_temperature = app.config.get('DEFAULT_TEMPERATURE', 0.2)
+
+        if not api_key:
+            return jsonify({"code": 400, "msg": "未配置百炼API Key"}), 400
+        if not api_endpoint:
+            return jsonify({"code": 400, "msg": "未配置百炼API Endpoint"}), 400
+
+        # 2) 请求体
+        data = request.get_json(silent=True) or {}
+        requirement_doc = (data.get('requirementDoc') or '').strip()
+        model_name = data.get('modelName', default_model)
+
+        try:
+            temperature = float(data.get('temperature', default_temperature))
+        except Exception:
+            temperature = float(default_temperature)
+
+        if not requirement_doc:
+            return jsonify({"code": 400, "msg": "需求文档不能为空"}), 400
+
+        logger.info(
+            f"[{req_id}] /api/generate-matrix START at {started} | model={model_name} | "
+            f"temperature={temperature} | requirement_len={len(requirement_doc)}"
         )
-        response.raise_for_status()
 
-        raw_text = (response.json().get("output", {}).get("text") or "").strip()
-
-        # ✅ 控制台打印大模型原始输出（你要求的）
-        logger.info(f"[{req_id}] LLM raw output begin >>>\n{raw_text}\n<<< LLM raw output end")
-
-        # 5) 解析 JSON/JSONC
-        extracted = _extract_json_object(raw_text)
-        stm_json = json.loads(_strip_jsonc_comments(extracted))
+        # 3) 调用模型生成 JSONC
+        stm_json = _generate_seat_jsonc(requirement_doc, model_name, temperature)
 
         if _is_seat_jsonc(stm_json):
             logger.info(f"[{req_id}] parsed SEAT JSONC model with tables={len(stm_json.keys())}")
@@ -521,6 +528,42 @@ SEAT模型建模后自动门系统的完整需求文档
         return jsonify({"code": 500, "msg": f"请求模型接口失败: {str(e)}"}), 500
     except Exception as e:
         logger.exception(f"[{req_id}] server error")
+        return jsonify({"code": 500, "msg": str(e)}), 500
+
+
+@app.route('/api/run-pipeline', methods=['POST'])
+def run_pipeline():
+    req_id = uuid.uuid4().hex[:8]
+    started = datetime.now().isoformat(timespec="seconds")
+    try:
+        data = request.get_json(silent=True) or {}
+        requirement_doc = (data.get('requirementDoc') or '').strip()
+        model_name = data.get('modelName', app.config.get('DEFAULT_MODEL'))
+        try:
+            temperature = float(data.get('temperature', app.config.get('DEFAULT_TEMPERATURE', 0.2)))
+        except Exception:
+            temperature = float(app.config.get('DEFAULT_TEMPERATURE', 0.2))
+
+        if not requirement_doc:
+            return jsonify({"code": 400, "msg": "需求文档不能为空"}), 400
+
+        logger.info(
+            f"[{req_id}] /api/run-pipeline START at {started} | model={model_name} | "
+            f"temperature={temperature} | requirement_len={len(requirement_doc)}"
+        )
+
+        jsonc_data = _generate_seat_jsonc(requirement_doc, model_name, temperature)
+        output_dir = f"outputs/pipeline_{req_id}"
+        result = run_full_pipeline(requirement_doc, jsonc_data, output_dir)
+
+        logger.info(f"[{req_id}] /api/run-pipeline SUCCESS")
+        return jsonify({
+            "code": 200,
+            "msg": "全流程完成",
+            "data": result
+        })
+    except Exception as e:
+        logger.exception(f"[{req_id}] pipeline error")
         return jsonify({"code": 500, "msg": str(e)}), 500
 
 
