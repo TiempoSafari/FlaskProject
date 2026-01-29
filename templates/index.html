@@ -133,7 +133,7 @@ function showError(msg) {
 function getMatrixFromTextarea() {
   const txt = zipcMatrix.value.trim();
   if (!txt) throw new Error("请先生成或粘贴 JSON");
-  return JSON.parse(txt);
+  return JSON.parse(stripJsoncComments(txt));
 }
 
 /* 生成按钮 */
@@ -356,6 +356,12 @@ function escapeHtml(str) {
     '"': "&quot;",
     "'": "&#039;"
   }[m]));
+}
+
+function stripJsoncComments(text) {
+  if (!text) return text;
+  const noBlock = text.replace(/\/\*[\s\S]*?\*\//g, "");
+  return noBlock.replace(/\/\/.*$/gm, "");
 }
 </script>
 
