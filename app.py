@@ -52,6 +52,24 @@ def _extract_json_object(text: str) -> str:
     return t
 
 
+def _strip_jsonc_comments(text: str) -> str:
+    """移除 JSONC 的 // 与 /* */ 注释（不处理字符串内部的注释样式）。"""
+    if not text:
+        return text
+    no_block = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    return re.sub(r"//.*$", "", no_block, flags=re.MULTILINE)
+
+
+def _is_seat_jsonc(model_json: dict) -> bool:
+    """判定是否为 SEAT JSONC 结构（顶层包含多个表，表内含 S/E/SEAT）。"""
+    if not isinstance(model_json, dict):
+        return False
+    for _, table in model_json.items():
+        if isinstance(table, dict) and "S" in table and "E" in table and "SEAT" in table:
+            return True
+    return False
+
+
 @app.route('/api/generate-matrix', methods=['POST'])
 def generate_matrix():
     req_id = uuid.uuid4().hex[:8]
@@ -87,47 +105,39 @@ def generate_matrix():
             f"temperature={temperature} | requirement_len={len(requirement_doc)}"
         )
 
-        # 3) Prompt（保持你原思路，但明确 actions 结构）
+        # 3) Prompt（SEAT JSONC 结构）
         json_prompt = f"""
 你是工业控制系统的状态机建模工程师。
 
 你的任务是：
-根据需求文档，生成【状态机的结构化 JSON 描述】，该 JSON 将作为唯一事实源，
-用于前端自动渲染状态转移矩阵，以及后续导出 ZIPC 状态机。
+根据需求文档，先进行 SEAT 状态迁移矩阵建模，再输出 JSONC 格式的 SEAT 模型。
+该 JSONC 将作为事实源，用于前端渲染 SEAT 表格与后续分析。
 
 【必须严格遵守】
-1. 只输出 JSON
+1. 只输出 JSONC（允许 // 和 /* */ 注释）
 2. 不要 Markdown
 3. 不要解释
-4. JSON 必须可被 json.loads() 解析
+4. JSONC 必须在移除注释后可被 json.loads() 解析
 
-【JSON 结构】
-{{
-  "states": [],
-  "events": [],
-  "actions": {{}},
-  "initial_state": "",
-  "transitions": [
-    {{
-      "event": "",
-      "from": "",
-      "to": "",
-      "actions": []
-    }}
-  ]
-}}
+【JSONC 结构要求】
+- 顶层为多个表对象（可包含主表与子表），键为表名：
+  "主表0", "子表0.1" 等
+- 每个表包含：
+  - meta: 表元数据（title/description/parent/initial/symbols 等）
+  - S: 状态集合（数组，元素为 {{name, type, children?, initial?}}）
+  - E: 事件集合（数组，字符串）
+  - SEAT: 二维矩阵（对象）
 
-【actions 字段要求（非常重要）】
-- actions 必须是对象/字典：{{"动作名": "描述字符串(可为空)"}}
-- 例如：{{"StartMotor": "启动电机", "StopMotor": ""}}
+【SEAT 单元格语义】
+- SEAT 的行键为事件 E，列键为状态 S.name
+- 单元格格式：{{ "A": [动作...], "T": "目标状态" }}
+  - A: 动作数组，可使用 "/" 表示无操作，"×" 表示非法操作
+  - T: 目标状态，"-" 表示保持当前状态
 
-【语义约束】
-- transitions 中引用的状态/事件/动作必须已定义
-- 同一 (event, from) 最多一条迁移（必须唯一）
-- 如需表示“任意状态触发”，允许使用 from="*"（后端会展开为所有 states）
-- 无迁移则不要生成 transition
-- 不要生成未定义的状态/事件/动作
-- states/events 不能为空
+【建模要求】
+- 必须先建模再分析需求问题，发现所有潜在漏洞/二义性/遗漏
+- 概念内涵与外延必须严格、无歧义
+- 模型需便于与概要设计、详细设计一一映射
 
 【需求文档】
 {requirement_doc}
@@ -142,7 +152,7 @@ def generate_matrix():
             "model": model_name,
             "input": {
                 "messages": [
-                    {"role": "system", "content": "你是状态机建模工程师，仅输出 JSON"},
+                    {"role": "system", "content": "你是状态机建模工程师，仅输出 JSONC"},
                     {"role": "user", "content": json_prompt}
                 ]
             },
@@ -166,9 +176,17 @@ def generate_matrix():
         # ✅ 控制台打印大模型原始输出（你要求的）
         logger.info(f"[{req_id}] LLM raw output begin >>>\n{raw_text}\n<<< LLM raw output end")
 
-        # 5) 解析 JSON
+        # 5) 解析 JSON/JSONC
         extracted = _extract_json_object(raw_text)
-        stm_json = json.loads(extracted)
+        stm_json = json.loads(_strip_jsonc_comments(extracted))
+
+        if _is_seat_jsonc(stm_json):
+            logger.info(f"[{req_id}] parsed SEAT JSONC model with tables={len(stm_json.keys())}")
+            return jsonify({
+                "code": 200,
+                "msg": "生成成功",
+                "data": stm_json
+            })
 
         logger.info(
             f"[{req_id}] parsed json summary | states={len(stm_json.get('states') or [])} "
@@ -226,6 +244,11 @@ def save_matrix():
         if data is None:
             return jsonify({"code": 400, "msg": "请求体必须是 JSON"}), 400
 
+        if _is_seat_jsonc(data):
+            with open("zipc_matrix.json", "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            return jsonify({"code": 200, "msg": "保存成功"})
+
         # 与生成接口同流程：expand -> normalize -> validate
         data = expand_wildcards(data)
         data = normalize_transitions(data)
@@ -249,6 +272,9 @@ def export_zipc():
         model_json = request.get_json(silent=True)
         if model_json is None:
             return jsonify({"code": 400, "msg": "请求体必须是 JSON"}), 400
+
+        if _is_seat_jsonc(model_json):
+            return jsonify({"code": 400, "msg": "SEAT JSONC 暂不支持 ZIPC 导出"}), 400
 
         model_json = expand_wildcards(model_json)
         model_json = normalize_transitions(model_json)
