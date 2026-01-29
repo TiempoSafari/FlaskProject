@@ -133,7 +133,7 @@ function showError(msg) {
 function getMatrixFromTextarea() {
   const txt = zipcMatrix.value.trim();
   if (!txt) throw new Error("请先生成或粘贴 JSON");
-  return JSON.parse(txt);
+  return JSON.parse(stripJsoncComments(txt));
 }
 
 /* 生成按钮 */
@@ -162,7 +162,11 @@ generateMatrix.onclick = async () => {
     // ✅ 修复点：后端 data 已经是对象，不要 JSON.parse
     const matrix = result.data;
 
-    renderMatrix(matrix);
+    if (isSeatModel(matrix)) {
+      renderSeatModel(matrix);
+    } else {
+      renderMatrix(matrix);
+    }
     zipcMatrix.value = JSON.stringify(matrix, null, 2);
 
   } catch (e) {
@@ -270,6 +274,80 @@ function renderMatrix(matrix) {
   resultContainer.innerHTML = html;
 }
 
+function renderSeatModel(model) {
+  const tables = Object.entries(model || {}).filter(([, table]) =>
+    table && typeof table === 'object' && table.S && table.E && table.SEAT
+  );
+
+  if (!tables.length) {
+    resultContainer.innerHTML = `<div class="text-danger text-center">无法识别 SEAT 模型结构</div>`;
+    return;
+  }
+
+  const sections = tables.map(([name, table]) => {
+    const meta = table.meta || {};
+    const states = (table.S || []).map(s => s.name || s);
+    const events = table.E || [];
+    const seat = table.SEAT || {};
+
+    let html = `
+      <div class="mb-6">
+        <div class="mb-2">
+          <h3 class="text-base font-semibold text-gray-800">${escapeHtml(name)}</h3>
+          ${meta.title ? `<p class="text-sm text-secondary">${escapeHtml(meta.title)}</p>` : ''}
+          ${meta.description ? `<p class="text-xs text-secondary mt-1">${escapeHtml(meta.description)}</p>` : ''}
+        </div>
+        <div class="overflow-x-auto">
+          <table class="min-w-full border text-sm">
+            <thead>
+              <tr>
+                <th class="border px-3 py-2 bg-gray-50">事件 \\ 状态</th>
+                ${states.map(s =>
+                  `<th class="border px-3 py-2 bg-gray-50">${escapeHtml(s)}</th>`
+                ).join('')}
+              </tr>
+            </thead>
+            <tbody>
+    `;
+
+    events.forEach(eventName => {
+      html += `<tr>
+        <td class="border px-3 py-2 font-medium bg-gray-50">${escapeHtml(eventName)}</td>`;
+
+      states.forEach(stateName => {
+        const cell = (seat[eventName] || {})[stateName];
+        if (!cell) {
+          html += `<td class="border px-3 py-2 text-center text-gray-400">/</td>`;
+          return;
+        }
+        const actions = Array.isArray(cell.A) ? cell.A.join(' + ') : (cell.A || '');
+        const target = cell.T || '-';
+        html += `
+          <td class="border px-3 py-2 text-primary">
+            <div>${escapeHtml(actions || '/')}</div>
+            <div class="text-xs text-secondary mt-1">→ ${escapeHtml(target)}</div>
+          </td>
+        `;
+      });
+
+      html += `</tr>`;
+    });
+
+    html += `</tbody></table></div></div>`;
+    return html;
+  });
+
+  resultContainer.innerHTML = sections.join('');
+}
+
+function isSeatModel(matrix) {
+  if (!matrix || typeof matrix !== 'object') return false;
+  if (Array.isArray(matrix.states) && Array.isArray(matrix.events)) return false;
+  return Object.values(matrix).some(table =>
+    table && typeof table === 'object' && table.S && table.E && table.SEAT
+  );
+}
+
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (m) => ({
     "&": "&amp;",
@@ -278,6 +356,12 @@ function escapeHtml(str) {
     '"': "&quot;",
     "'": "&#039;"
   }[m]));
+}
+
+function stripJsoncComments(text) {
+  if (!text) return text;
+  const noBlock = text.replace(/\/\*[\s\S]*?\*\//g, "");
+  return noBlock.replace(/\/\/.*$/gm, "");
 }
 </script>
 
