@@ -168,11 +168,35 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
     return graph
 
 
-def _configure_matplotlib_fonts() -> None:
+def _configure_matplotlib_fonts() -> Optional[str]:
     import matplotlib
     from matplotlib import font_manager
 
     matplotlib.use("Agg")
+    custom_font = os.getenv("SEAT_KG_FONT")
+    if custom_font and os.path.isfile(custom_font):
+        matplotlib.rcParams["font.sans-serif"] = [font_manager.FontProperties(fname=custom_font).get_name()]
+        matplotlib.rcParams["axes.unicode_minus"] = False
+        return custom_font
+
+    font_candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/Library/Fonts/PingFang.ttc",
+        "/Library/Fonts/Songti.ttc",
+        "C:\\\\Windows\\\\Fonts\\\\msyh.ttc",
+        "C:\\\\Windows\\\\Fonts\\\\simhei.ttf",
+        "C:\\\\Windows\\\\Fonts\\\\simfang.ttf",
+    ]
+    for path in font_candidates:
+        if os.path.isfile(path):
+            matplotlib.rcParams["font.sans-serif"] = [font_manager.FontProperties(fname=path).get_name()]
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            return path
+
     preferred_fonts = [
         "Microsoft YaHei",
         "SimHei",
@@ -187,13 +211,15 @@ def _configure_matplotlib_fonts() -> None:
         if name in available_fonts:
             matplotlib.rcParams["font.sans-serif"] = [name]
             matplotlib.rcParams["axes.unicode_minus"] = False
-            return
+            return name
+    return None
 
 
 def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager
 
-    _configure_matplotlib_fonts()
+    font_path = _configure_matplotlib_fonts()
 
     if not graph.nodes:
         return
@@ -202,7 +228,8 @@ def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
     node_labels = {node: data.get("name", node) for node, data in graph.nodes(data=True)}
     nx.draw_networkx_nodes(graph, pos, node_size=400, node_color="#c7ddff")
     nx.draw_networkx_edges(graph, pos, arrows=True, alpha=0.3)
-    nx.draw_networkx_labels(graph, pos, labels=node_labels, font_size=8)
+    font_props = font_manager.FontProperties(fname=font_path) if font_path and os.path.isfile(font_path) else None
+    nx.draw_networkx_labels(graph, pos, labels=node_labels, font_size=8, font_family=None, font_properties=font_props)
     plt.axis("off")
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
