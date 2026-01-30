@@ -168,8 +168,32 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
     return graph
 
 
+def _configure_matplotlib_fonts() -> None:
+    import matplotlib
+    from matplotlib import font_manager
+
+    matplotlib.use("Agg")
+    preferred_fonts = [
+        "Microsoft YaHei",
+        "SimHei",
+        "PingFang SC",
+        "Noto Sans CJK SC",
+        "Source Han Sans SC",
+        "WenQuanYi Micro Hei",
+        "Arial Unicode MS",
+    ]
+    available_fonts = {font.name for font in font_manager.fontManager.ttflist}
+    for name in preferred_fonts:
+        if name in available_fonts:
+            matplotlib.rcParams["font.sans-serif"] = [name]
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            return
+
+
 def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
     import matplotlib.pyplot as plt
+
+    _configure_matplotlib_fonts()
 
     if not graph.nodes:
         return
