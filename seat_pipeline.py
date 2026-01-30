@@ -228,8 +228,10 @@ def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
     node_labels = {node: data.get("name", node) for node, data in graph.nodes(data=True)}
     nx.draw_networkx_nodes(graph, pos, node_size=400, node_color="#c7ddff")
     nx.draw_networkx_edges(graph, pos, arrows=True, alpha=0.3)
-    font_props = font_manager.FontProperties(fname=font_path) if font_path and os.path.isfile(font_path) else None
-    nx.draw_networkx_labels(graph, pos, labels=node_labels, font_size=8, font_family=None, font_properties=font_props)
+    font_family = None
+    if font_path and os.path.isfile(font_path):
+        font_family = font_manager.FontProperties(fname=font_path).get_name()
+    nx.draw_networkx_labels(graph, pos, labels=node_labels, font_size=8, font_family=font_family)
     plt.axis("off")
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
