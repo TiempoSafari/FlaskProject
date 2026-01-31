@@ -561,7 +561,13 @@ def run_pipeline():
         jsonc_data = _generate_seat_jsonc(requirement_doc, model_name, temperature)
         output_dir = f"outputs/pipeline_{req_id}"
         # 2) 运行完整流水线并写出产物
-        result = run_full_pipeline(requirement_doc, jsonc_data, output_dir)
+        llm_config = {
+            "api_key": app.config.get('DASHSCOPE_API_KEY'),
+            "api_endpoint": app.config.get('DASHSCOPE_API_ENDPOINT'),
+            "model_name": model_name,
+            "temperature": temperature,
+        }
+        result = run_full_pipeline(requirement_doc, jsonc_data, output_dir, llm_config=llm_config)
 
         logger.info(f"[{req_id}] /api/run-pipeline SUCCESS")
         return jsonify({

@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import networkx as nx
 from openpyxl import Workbook
+import requests
 
 
 SYMBOL_ACTION_NONE = "/"
@@ -50,6 +51,30 @@ def _table_entries(jsonc_data: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]
         for name, table in (jsonc_data or {}).items()
         if isinstance(table, dict) and "S" in table and "E" in table and "SEAT" in table
     ]
+
+
+def _extract_json_object(text: str) -> str:
+    """从大模型输出中提取最外层 JSON 对象或数组。"""
+    if not text:
+        return text
+    t = text.strip()
+    t = re.sub(r"^```(?:json)?\s*", "", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s*```$", "", t)
+    match_obj = re.search(r"\{[\s\S]*\}\s*$", t)
+    if match_obj:
+        return match_obj.group(0).strip()
+    match_list = re.search(r"\[[\s\S]*\]\s*$", t)
+    if match_list:
+        return match_list.group(0).strip()
+    return t
+
+
+def _strip_jsonc_comments(text: str) -> str:
+    """移除 JSONC 的 // 与 /* */ 注释（不处理字符串内部注释）。"""
+    if not text:
+        return text
+    no_block = re.sub(r"/\*[\s\S]*?\*/", "", text)
+    return re.sub(r"//.*$", "", no_block, flags=re.MULTILINE)
 
 
 def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
@@ -180,6 +205,38 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
     return graph
 
 
+def summarize_knowledge_graph(graph: nx.DiGraph, limit: int = 200) -> Dict[str, Any]:
+    """将知识图谱转为可读摘要，提供给大模型生成规则。"""
+    nodes_summary = []
+    edges_summary = []
+    for node, data in graph.nodes(data=True):
+        nodes_summary.append({
+            "id": node,
+            "type": data.get("type"),
+            "name": data.get("name"),
+            "table": data.get("table"),
+        })
+        if len(nodes_summary) >= limit:
+            break
+
+    for source, target, data in graph.edges(data=True):
+        edges_summary.append({
+            "from": source,
+            "to": target,
+            "type": data.get("type"),
+            "table": data.get("table"),
+        })
+        if len(edges_summary) >= limit:
+            break
+
+    return {
+        "nodes": nodes_summary,
+        "edges": edges_summary,
+        "node_count": graph.number_of_nodes(),
+        "edge_count": graph.number_of_edges(),
+    }
+
+
 def _configure_matplotlib_fonts() -> Optional[str]:
     """为知识图谱图片选择可用的中文字体，避免出现方框乱码。"""
     import matplotlib
@@ -252,69 +309,96 @@ def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
     plt.close()
 
 
+def _normalize_rule_dict(rule: Dict[str, Any]) -> Rule:
+    """将字典规则转换为 Rule 对象，并做最小字段校验。"""
+    if not isinstance(rule, dict):
+        raise ValueError("规则必须是对象")
+    required = ["rule_id", "rule_type", "source", "description", "condition"]
+    for field in required:
+        if field not in rule:
+            raise ValueError(f"规则缺少字段: {field}")
+    return Rule(
+        rule_id=str(rule["rule_id"]),
+        rule_type=str(rule["rule_type"]),
+        source=str(rule["source"]),
+        description=str(rule["description"]),
+        condition=rule["condition"] if isinstance(rule["condition"], dict) else {},
+        correction=rule.get("correction"),
+    )
+
+
+def generate_rules_with_llm(
+    requirement_doc: str,
+    knowledge_graph: nx.DiGraph,
+    llm_config: Dict[str, Any],
+) -> List[Rule]:
+    """调用百炼大模型，根据需求文档 + 知识图谱生成规则集。"""
+    api_key = llm_config.get("api_key")
+    api_endpoint = llm_config.get("api_endpoint")
+    model_name = llm_config.get("model_name")
+    temperature = llm_config.get("temperature", 0.2)
+
+    if not api_key or not api_endpoint or not model_name:
+        raise ValueError("规则生成需要 api_key/api_endpoint/model_name")
+
+    graph_summary = summarize_knowledge_graph(knowledge_graph)
+    prompt = f"""
+你是SEAT模型规则抽取专家。根据以下需求文档与知识图谱摘要，生成冲突规则与遗漏规则。
+
+【需求文档】
+{requirement_doc}
+
+【知识图谱摘要】
+{json.dumps(graph_summary, ensure_ascii=False)}
+
+【输出要求】
+1) 仅输出 JSON 数组，不要 Markdown，不要解释。
+2) 数组元素为规则对象，字段结构如下：
+  {{
+    "rule_id": "C001",
+    "rule_type": "冲突/遗漏",
+    "source": "需求显式约束/需求隐含约束/SEAT公理/领域常识",
+    "description": "规则描述",
+    "condition": {{ ... }},
+    "correction": {{ ... }}
+  }}
+3) 规则必须基于需求文档与图谱推导，不能写死固定规则。
+4) 如果无法生成规则，也必须输出空数组 []。
+""".strip()
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+
+    payload = {
+        "model": model_name,
+        "input": {
+            "messages": [
+                {"role": "system", "content": "你是规则抽取专家，仅输出JSON数组"},
+                {"role": "user", "content": prompt},
+            ]
+        },
+        "parameters": {
+            "temperature": float(temperature),
+            "max_tokens": 2000,
+        },
+    }
+
+    response = requests.post(api_endpoint, headers=headers, json=payload, timeout=60)
+    response.raise_for_status()
+    raw_text = (response.json().get("output", {}).get("text") or "").strip()
+    extracted = _extract_json_object(raw_text)
+    data = json.loads(_strip_jsonc_comments(extracted))
+
+    if not isinstance(data, list):
+        raise ValueError("规则生成结果必须是数组")
+    return [_normalize_rule_dict(item) for item in data]
+
+
 def extract_rules(requirement_doc: str, jsonc_data: Dict[str, Any]) -> List[Rule]:
-    """从需求文本中抽取规则，并补充内置规则模板。"""
-    text = _clean_text(requirement_doc)
-    rules: List[Rule] = [
-        Rule(
-            rule_id="C001",
-            rule_type="冲突",
-            source="SEAT公理",
-            description="同一状态+同一事件只能有一个转移目标",
-            condition={"state": "*", "event": "*", "transfer_count": ">1"},
-            correction={"action": SYMBOL_ACTION_ILLEGAL, "transfer": SYMBOL_TRANSITION_STAY},
-        ),
-        Rule(
-            rule_id="M001",
-            rule_type="遗漏",
-            source="SEAT完备性",
-            description="状态-事件组合必须定义动作与转移",
-            condition={"state": "*", "event": "*", "action_missing": True, "transfer_missing": True},
-            correction={"action": SYMBOL_ACTION_NONE, "transfer": SYMBOL_TRANSITION_STAY},
-        ),
-        Rule(
-            rule_id="C003",
-            rule_type="冲突",
-            source="领域常识",
-            description="开门与关门动作互斥",
-            condition={"action_conflict": ["开门", "关门"]},
-            correction={"action": SYMBOL_ACTION_ILLEGAL, "transfer": SYMBOL_TRANSITION_STAY},
-        ),
-    ]
-
-    if "电源" in text and "传感器" in text:
-        rules.append(
-            Rule(
-                rule_id="C002",
-                rule_type="冲突",
-                source="需求显式约束",
-                description="电源关状态下传感器事件无效",
-                condition={
-                    "state": "电源关",
-                    "event": ["检测到人", "检测门已开", "检测门已关"],
-                    "action_not": SYMBOL_ACTION_NONE,
-                    "transfer_not": SYMBOL_TRANSITION_STAY,
-                },
-                correction={"action": SYMBOL_ACTION_NONE, "transfer": SYMBOL_TRANSITION_STAY},
-            )
-        )
-
-    if "等待" in text and "关门" in text:
-        rules.append(
-            Rule(
-                rule_id="M002",
-                rule_type="遗漏",
-                source="需求隐含约束",
-                description="已开门+开门等待时间到必须进入关门中",
-                condition={"state": "已开门", "event": "开门等待时间到"},
-                correction={
-                    "action": ["启动关门电机", "设置关门时长"],
-                    "transfer": "关门中",
-                },
-            )
-        )
-
-    return rules
+    """已弃用：规则改由大模型基于知识图谱与需求生成。"""
+    raise RuntimeError("extract_rules 已弃用，请使用 generate_rules_with_llm")
 
 
 def write_rule_configs(rules: Iterable[Rule], output_dir: str) -> Dict[str, str]:
@@ -532,12 +616,17 @@ def run_full_pipeline(
     requirement_doc: str,
     jsonc_data: Dict[str, Any],
     output_dir: str,
+    llm_config: Optional[Dict[str, Any]] = None,
     max_iterations: int = 3,
 ) -> Dict[str, Any]:
     """端到端流程：规则抽取 → 校验 → 修正 → 图谱 → 矩阵输出。"""
     os.makedirs(output_dir, exist_ok=True)
 
-    rules = extract_rules(requirement_doc, jsonc_data)
+    # 1) 基于 JSONC 先构建知识图谱
+    initial_kg = build_knowledge_graph(jsonc_data)
+
+    # 2) 基于需求文档 + 知识图谱生成规则（由大模型生成，不再硬编码）
+    rules = generate_rules_with_llm(requirement_doc, initial_kg, llm_config or {})
     rule_paths = write_rule_configs(rules, os.path.join(output_dir, "rule_config"))
 
     corrected_jsonc = jsonc_data
@@ -548,6 +637,7 @@ def run_full_pipeline(
             break
         corrected_jsonc = apply_validation_fixes(corrected_jsonc, validation_report)
 
+    # 3) 修正后重新构建知识图谱
     kg = build_knowledge_graph(corrected_jsonc)
     graph_path = os.path.join(output_dir, "knowledge_graph.gpickle")
     with open(graph_path, "wb") as handle:
