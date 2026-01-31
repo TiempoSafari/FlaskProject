@@ -39,10 +39,12 @@ class RuleIssue:
 
 
 def _clean_text(text: str) -> str:
+    """压缩空白字符，便于从需求文本中做关键字判断。"""
     return re.sub(r"\s+", " ", text or "").strip()
 
 
 def _table_entries(jsonc_data: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
+    """提取所有符合 SEAT 结构的表（包含 S/E/SEAT 的对象）。"""
     return [
         (name, table)
         for name, table in (jsonc_data or {}).items()
@@ -60,10 +62,12 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
     tables = _table_entries(jsonc_data)
 
     for table_name, table in tables:
+        # 1) 读取表中的状态、事件、矩阵
         states = table.get("S", [])
         events = table.get("E", [])
         seat = table.get("SEAT", {})
 
+        # 2) 添加 State 节点
         for state in states:
             if isinstance(state, dict):
                 state_name = state.get("name")
@@ -84,6 +88,7 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
                 table=table_name,
             )
 
+        # 3) 添加 Event 节点
         for event in events:
             event_name = str(event)
             trigger_type = "手动" if "按" in event_name or "按钮" in event_name else "自动"
@@ -96,8 +101,10 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
                 table=table_name,
             )
 
+        # 4) 遍历 SEAT 单元格，创建 Combo/Action/TRANS_TO 边
         for event_name, row in seat.items():
             for state_name, cell in (row or {}).items():
+                # Combo 节点表示“状态 + 事件”的组合上下文
                 combo_id = f"Combo::{table_name}::{state_name}::{event_name}"
                 graph.add_node(
                     combo_id,
@@ -105,12 +112,14 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
                     name=f"{state_name}+{event_name}",
                     table=table_name,
                 )
+                # TRIGGER：事件 -> 状态（事件在该状态下触发）
                 graph.add_edge(
                     f"Event::{event_name}",
                     f"State::{state_name}",
                     type="TRIGGER",
                     table=table_name,
                 )
+                # COMPOSE：状态 -> 组合
                 graph.add_edge(
                     f"State::{state_name}",
                     combo_id,
@@ -122,6 +131,7 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
                 if isinstance(cell, dict):
                     actions = cell.get("A", []) or []
 
+                # EXECUTE：组合 -> 动作
                 for action in actions:
                     if action in (SYMBOL_ACTION_NONE, SYMBOL_ACTION_ILLEGAL):
                         continue
@@ -143,6 +153,7 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
                 target = None
                 if isinstance(cell, dict):
                     target = cell.get("T")
+                # TRANS_TO：组合 -> 目标状态
                 if target and target not in (SYMBOL_TRANSITION_STAY, "null"):
                     graph.add_edge(
                         combo_id,
@@ -151,6 +162,7 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
                         table=table_name,
                     )
 
+        # 5) CONTAIN：复合状态包含子状态
         for state in states:
             if not isinstance(state, dict):
                 continue
@@ -169,6 +181,7 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
 
 
 def _configure_matplotlib_fonts() -> Optional[str]:
+    """为知识图谱图片选择可用的中文字体，避免出现方框乱码。"""
     import matplotlib
     from matplotlib import font_manager
 
@@ -216,6 +229,7 @@ def _configure_matplotlib_fonts() -> Optional[str]:
 
 
 def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
+    """绘制知识图谱 PNG（只做可视化，不改变图数据）。"""
     import matplotlib.pyplot as plt
     from matplotlib import font_manager
 
@@ -239,6 +253,7 @@ def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
 
 
 def extract_rules(requirement_doc: str, jsonc_data: Dict[str, Any]) -> List[Rule]:
+    """从需求文本中抽取规则，并补充内置规则模板。"""
     text = _clean_text(requirement_doc)
     rules: List[Rule] = [
         Rule(
@@ -303,6 +318,7 @@ def extract_rules(requirement_doc: str, jsonc_data: Dict[str, Any]) -> List[Rule
 
 
 def write_rule_configs(rules: Iterable[Rule], output_dir: str) -> Dict[str, str]:
+    """把规则写成 4 个层级的 .conf 文件，方便人工查看/维护。"""
     os.makedirs(output_dir, exist_ok=True)
     paths = {
         "base_rules.conf": os.path.join(output_dir, "base_rules.conf"),
@@ -353,6 +369,7 @@ def write_rule_configs(rules: Iterable[Rule], output_dir: str) -> Dict[str, str]
 
 
 def _match_rule(rule: Rule, state: str, event: str, actions: List[str], target: Optional[str]) -> bool:
+    """判断某个状态-事件单元格是否命中某条规则。"""
     cond = rule.condition or {}
     if cond.get("state") not in (None, "*", state):
         return False
@@ -384,6 +401,7 @@ def _match_rule(rule: Rule, state: str, event: str, actions: List[str], target: 
 
 
 def validate_jsonc_rules(jsonc_data: Dict[str, Any], rules: List[Rule]) -> Dict[str, Any]:
+    """遍历所有“事件 × 状态”的组合，生成冲突/遗漏报告。"""
     issues: List[RuleIssue] = []
     for table_name, table in _table_entries(jsonc_data):
         seat = table.get("SEAT", {})
@@ -424,6 +442,7 @@ def validate_jsonc_rules(jsonc_data: Dict[str, Any], rules: List[Rule]) -> Dict[
 
 
 def apply_validation_fixes(jsonc_data: Dict[str, Any], report: Dict[str, Any]) -> Dict[str, Any]:
+    """根据校验报告自动修正缺失/冲突的单元格。"""
     if not report:
         return jsonc_data
     data = json.loads(json.dumps(jsonc_data, ensure_ascii=False))
@@ -452,6 +471,7 @@ def apply_validation_fixes(jsonc_data: Dict[str, Any], report: Dict[str, Any]) -
 
 
 def jsonc_to_seat_matrix(jsonc_data: Dict[str, Any], output_dir: str) -> Dict[str, Any]:
+    """把 JSONC 转换为 Markdown + Excel 矩阵文件。"""
     os.makedirs(output_dir, exist_ok=True)
     matrices = {}
     for table_name, table in _table_entries(jsonc_data):
@@ -514,6 +534,7 @@ def run_full_pipeline(
     output_dir: str,
     max_iterations: int = 3,
 ) -> Dict[str, Any]:
+    """端到端流程：规则抽取 → 校验 → 修正 → 图谱 → 矩阵输出。"""
     os.makedirs(output_dir, exist_ok=True)
 
     rules = extract_rules(requirement_doc, jsonc_data)

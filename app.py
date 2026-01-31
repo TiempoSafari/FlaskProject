@@ -72,6 +72,8 @@ def _is_seat_jsonc(model_json: dict) -> bool:
 
 
 def _generate_seat_jsonc(requirement_doc: str, model_name: str, temperature: float) -> dict:
+    # 调用百炼大模型，把自然语言需求转换为 SEAT JSONC 结构。
+    # 该函数只负责“模型调用 + 解析 JSONC”，不做后续校验与修正。
     api_key = app.config.get('DASHSCOPE_API_KEY')
     api_endpoint = app.config.get('DASHSCOPE_API_ENDPOINT')
 
@@ -80,6 +82,7 @@ def _generate_seat_jsonc(requirement_doc: str, model_name: str, temperature: flo
     if not api_endpoint:
         raise ValueError("未配置百炼API Endpoint")
 
+    # 这是给大模型的完整 Prompt 模板，用于指导生成 SEAT JSONC。
     json_prompt = f"""
 你是工业控制系统的状态机建模工程师。
 
@@ -438,11 +441,12 @@ SEAT模型建模后自动门系统的完整需求文档
 
 @app.route('/api/generate-matrix', methods=['POST'])
 def generate_matrix():
+    # 轻量流程：仅生成 JSONC 或 ZIPC 结构并返回给前端渲染。
     req_id = uuid.uuid4().hex[:8]
     started = datetime.now().isoformat(timespec="seconds")
 
     try:
-        # 1) 配置
+        # 1) 读取配置（API Key/Endpoint/默认模型/温度）
         api_key = app.config.get('DASHSCOPE_API_KEY')
         api_endpoint = app.config.get('DASHSCOPE_API_ENDPOINT')
         default_model = app.config.get('DEFAULT_MODEL')
@@ -453,7 +457,7 @@ def generate_matrix():
         if not api_endpoint:
             return jsonify({"code": 400, "msg": "未配置百炼API Endpoint"}), 400
 
-        # 2) 请求体
+        # 2) 读取请求体参数
         data = request.get_json(silent=True) or {}
         requirement_doc = (data.get('requirementDoc') or '').strip()
         model_name = data.get('modelName', default_model)
@@ -533,6 +537,7 @@ def generate_matrix():
 
 @app.route('/api/run-pipeline', methods=['POST'])
 def run_pipeline():
+    # 全流程入口：生成 JSONC -> 规则校验 -> 知识图谱 -> 矩阵输出。
     req_id = uuid.uuid4().hex[:8]
     started = datetime.now().isoformat(timespec="seconds")
     try:
@@ -552,8 +557,10 @@ def run_pipeline():
             f"temperature={temperature} | requirement_len={len(requirement_doc)}"
         )
 
+        # 1) 生成 SEAT JSONC
         jsonc_data = _generate_seat_jsonc(requirement_doc, model_name, temperature)
         output_dir = f"outputs/pipeline_{req_id}"
+        # 2) 运行完整流水线并写出产物
         result = run_full_pipeline(requirement_doc, jsonc_data, output_dir)
 
         logger.info(f"[{req_id}] /api/run-pipeline SUCCESS")
@@ -569,6 +576,7 @@ def run_pipeline():
 
 @app.route('/api/save-matrix', methods=['POST'])
 def save_matrix():
+    # 保存 JSON 到 zipc_matrix.json，支持 SEAT JSONC 或 ZIPC 结构。
     try:
         data = request.get_json(silent=True)
         if data is None:
