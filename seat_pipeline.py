@@ -345,6 +345,22 @@ def generate_rules_with_llm(
     prompt = f"""
 你是SEAT模型规则抽取专家。根据以下需求文档与知识图谱摘要，生成冲突规则与遗漏规则。
 
+【知识图谱含义说明】
+1) 节点类型：
+  - State：状态节点，来源于 JSONC 的 S（状态集合）。
+  - Event：事件节点，来源于 JSONC 的 E（事件集合）。
+  - Action：动作节点，来源于 SEAT 单元格 A（动作列表，已过滤“/”“×”）。
+  - Combo：状态+事件组合节点，表示“某状态下触发某事件”的上下文。
+2) 边类型：
+  - TRIGGER：Event -> State，表示“事件在该状态下触发”。
+  - COMPOSE：State -> Combo，表示“状态参与某组合上下文”。
+  - EXECUTE：Combo -> Action，表示“该组合执行某动作”。
+  - TRANS_TO：Combo -> State，表示“该组合转移到目标状态”。
+  - CONTAIN：State -> State，表示复合状态包含子状态。
+3) 规则应利用图谱结构与需求文本进行一致性检查：
+  - 冲突：与需求或图谱逻辑矛盾（例如同一组合出现互斥动作/转移）。
+  - 遗漏：需求或图谱应有但未明确说明的组合动作/转移。
+
 【需求文档】
 {requirement_doc}
 
@@ -359,11 +375,21 @@ def generate_rules_with_llm(
     "rule_type": "冲突/遗漏",
     "source": "需求显式约束/需求隐含约束/SEAT公理/领域常识",
     "description": "规则描述",
-    "condition": {{ ... }},
-    "correction": {{ ... }}
+    "condition": {{
+      "state": "状态名或*",
+      "event": "事件名或[事件列表]或*",
+      "action": "动作名或[动作列表]或条件",
+      "transfer": "目标状态名或条件"
+    }},
+    "correction": {{
+      "action": "动作名或[动作列表]",
+      "transfer": "目标状态名"
+    }}
   }}
-3) 规则必须基于需求文档与图谱推导，不能写死固定规则。
-4) 如果无法生成规则，也必须输出空数组 []。
+3) condition 中字段可按需省略，但必须与需求和图谱语义一致。
+4) correction 字段必须使用 action/transfer，不要使用 next_state 等其他字段名。
+5) 规则必须基于需求文档与图谱推导，不能写死固定规则。
+6) 如果无法生成规则，也必须输出空数组 []。
 """.strip()
 
     headers = {
