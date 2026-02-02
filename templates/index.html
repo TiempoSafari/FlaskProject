@@ -235,9 +235,13 @@ runPipeline.onclick = async () => {
         <div class="font-medium text-gray-800 mb-2">${escapeHtml(name)}</div>
         <div class="text-xs text-secondary mb-2">Markdown：${escapeHtml(payload.markdown_path || '')}</div>
         <div class="text-xs text-secondary mb-2">Excel：${escapeHtml(payload.excel_path || '')}</div>
-        <pre class="text-xs whitespace-pre-wrap bg-white p-2 rounded border">${escapeHtml(payload.markdown || '')}</pre>
       </div>
     `).join('');
+
+    if (data.jsonc) {
+      renderSeatModel(data.jsonc);
+      zipcMatrix.value = JSON.stringify(data.jsonc, null, 2);
+    }
 
     pipelineSummary.classList.remove('hidden');
   } catch (e) {
