@@ -80,19 +80,17 @@ def _strip_jsonc_comments(text: str) -> str:
 def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
     """
     构建知识图谱（NetworkX 有向图）。
-    节点类型：State/Event/Action/Combo
-    边类型：TRIGGER/EXECUTE/TRANS_TO/CONTAIN
+    节点：仅使用 State（状态）节点。
+    边：State -> State 的 TRANSITION 边，动作/事件等作为边属性。
     """
     graph = nx.DiGraph()
     tables = _table_entries(jsonc_data)
 
     for table_name, table in tables:
-        # 1) 读取表中的状态、事件、矩阵
         states = table.get("S", [])
-        events = table.get("E", [])
         seat = table.get("SEAT", {})
 
-        # 2) 添加 State 节点
+        # 1) 添加状态节点
         for state in states:
             if isinstance(state, dict):
                 state_name = state.get("name")
@@ -113,81 +111,26 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
                 table=table_name,
             )
 
-        # 3) 添加 Event 节点
-        for event in events:
-            event_name = str(event)
-            trigger_type = "手动" if "按" in event_name or "按钮" in event_name else "自动"
-            node_id = f"Event::{event_name}"
-            graph.add_node(
-                node_id,
-                type="Event",
-                name=event_name,
-                trigger_type=trigger_type,
-                table=table_name,
-            )
-
-        # 4) 遍历 SEAT 单元格，创建 Combo/Action/TRANS_TO 边
+        # 2) 添加转移边（事件/动作作为属性）
         for event_name, row in seat.items():
             for state_name, cell in (row or {}).items():
-                # Combo 节点表示“状态 + 事件”的组合上下文
-                combo_id = f"Combo::{table_name}::{state_name}::{event_name}"
-                graph.add_node(
-                    combo_id,
-                    type="Combo",
-                    name=f"{state_name}+{event_name}",
-                    table=table_name,
-                )
-                # TRIGGER：事件 -> 状态（事件在该状态下触发）
-                graph.add_edge(
-                    f"Event::{event_name}",
-                    f"State::{state_name}",
-                    type="TRIGGER",
-                    table=table_name,
-                )
-                # COMPOSE：状态 -> 组合
+                if not isinstance(cell, dict):
+                    continue
+                target = cell.get("T") or SYMBOL_TRANSITION_STAY
+                actions = cell.get("A") or []
+                if target in (SYMBOL_TRANSITION_STAY, "null"):
+                    continue
+
                 graph.add_edge(
                     f"State::{state_name}",
-                    combo_id,
-                    type="COMPOSE",
+                    f"State::{target}",
+                    type="TRANSITION",
                     table=table_name,
+                    event=event_name,
+                    actions=[a for a in actions if a not in (SYMBOL_ACTION_NONE, SYMBOL_ACTION_ILLEGAL)],
                 )
 
-                actions = []
-                if isinstance(cell, dict):
-                    actions = cell.get("A", []) or []
-
-                # EXECUTE：组合 -> 动作
-                for action in actions:
-                    if action in (SYMBOL_ACTION_NONE, SYMBOL_ACTION_ILLEGAL):
-                        continue
-                    action_id = f"Action::{action}"
-                    operate_type = "执行"
-                    graph.add_node(
-                        action_id,
-                        type="Action",
-                        name=action,
-                        operate_type=operate_type,
-                    )
-                    graph.add_edge(
-                        combo_id,
-                        action_id,
-                        type="EXECUTE",
-                        table=table_name,
-                    )
-
-                target = None
-                if isinstance(cell, dict):
-                    target = cell.get("T")
-                # TRANS_TO：组合 -> 目标状态
-                if target and target not in (SYMBOL_TRANSITION_STAY, "null"):
-                    graph.add_edge(
-                        combo_id,
-                        f"State::{target}",
-                        type="TRANS_TO",
-                        table=table_name,
-                    )
-
-        # 5) CONTAIN：复合状态包含子状态
+        # 3) CONTAIN：复合状态包含子状态
         for state in states:
             if not isinstance(state, dict):
                 continue
@@ -206,32 +149,44 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
 
 
 def summarize_knowledge_graph(graph: nx.DiGraph, limit: int = 200) -> Dict[str, Any]:
-    """将知识图谱转为可读摘要，提供给大模型生成规则。"""
-    nodes_summary = []
-    edges_summary = []
+    """将知识图谱转为结构化摘要（按类型聚合 + 转移边属性）。"""
+    states = []
+    transitions = []
+    contains = []
+
     for node, data in graph.nodes(data=True):
-        nodes_summary.append({
-            "id": node,
-            "type": data.get("type"),
-            "name": data.get("name"),
-            "table": data.get("table"),
-        })
-        if len(nodes_summary) >= limit:
+        if data.get("type") == "State":
+            states.append({
+                "id": node,
+                "name": data.get("name"),
+                "state_type": data.get("state_type"),
+                "table": data.get("table"),
+            })
+        if len(states) >= limit:
             break
 
     for source, target, data in graph.edges(data=True):
-        edges_summary.append({
-            "from": source,
-            "to": target,
-            "type": data.get("type"),
-            "table": data.get("table"),
-        })
-        if len(edges_summary) >= limit:
+        edge_type = data.get("type")
+        if edge_type == "TRANSITION":
+            transitions.append({
+                "from": source,
+                "to": target,
+                "event": data.get("event"),
+                "actions": data.get("actions"),
+                "table": data.get("table"),
+            })
+        elif edge_type == "CONTAIN":
+            contains.append({
+                "parent": source,
+                "child": target,
+            })
+        if len(transitions) + len(contains) >= limit:
             break
 
     return {
-        "nodes": nodes_summary,
-        "edges": edges_summary,
+        "states": states,
+        "transitions": transitions,
+        "contains": contains,
         "node_count": graph.number_of_nodes(),
         "edge_count": graph.number_of_edges(),
     }
@@ -348,18 +303,14 @@ def generate_rules_with_llm(
 【知识图谱含义说明】
 1) 节点类型：
   - State：状态节点，来源于 JSONC 的 S（状态集合）。
-  - Event：事件节点，来源于 JSONC 的 E（事件集合）。
-  - Action：动作节点，来源于 SEAT 单元格 A（动作列表，已过滤“/”“×”）。
-  - Combo：状态+事件组合节点，表示“某状态下触发某事件”的上下文。
 2) 边类型：
-  - TRIGGER：Event -> State，表示“事件在该状态下触发”。
-  - COMPOSE：State -> Combo，表示“状态参与某组合上下文”。
-  - EXECUTE：Combo -> Action，表示“该组合执行某动作”。
-  - TRANS_TO：Combo -> State，表示“该组合转移到目标状态”。
+  - TRANSITION：State -> State，表示状态转移。事件/动作作为边属性：
+      - event：触发事件名称
+      - actions：动作列表（已过滤“/”“×”）
   - CONTAIN：State -> State，表示复合状态包含子状态。
 3) 规则应利用图谱结构与需求文本进行一致性检查：
-  - 冲突：与需求或图谱逻辑矛盾（例如同一组合出现互斥动作/转移）。
-  - 遗漏：需求或图谱应有但未明确说明的组合动作/转移。
+  - 冲突：与需求或图谱逻辑矛盾（例如同一状态+事件产生多个不同转移）。
+  - 遗漏：需求或图谱应有但未明确说明的转移动作/目标。
 
 【需求文档】
 {requirement_doc}
