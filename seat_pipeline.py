@@ -251,18 +251,8 @@ def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
         return
     plt.figure(figsize=(12, 8))
     pos = nx.spring_layout(graph, k=0.8, seed=42)
-    node_labels = {}
-    for node, data in graph.nodes(data=True):
-        name = data.get("name", node)
-        state_type = data.get("state_type")
-        table = data.get("table")
-        parts = [f"{name}"]
-        if state_type:
-            parts.append(f"type={state_type}")
-        if table:
-            parts.append(f"table={table}")
-        node_labels[node] = "\n".join(parts)
-    nx.draw_networkx_nodes(graph, pos, node_size=600, node_color="#c7ddff")
+    node_labels = {node: data.get("name", node) for node, data in graph.nodes(data=True)}
+    nx.draw_networkx_nodes(graph, pos, node_size=500, node_color="#c7ddff")
     nx.draw_networkx_edges(graph, pos, arrows=True, alpha=0.3)
     font_family = None
     if font_path and os.path.isfile(font_path):
