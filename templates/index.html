@@ -63,6 +63,11 @@
         <i class="fa fa-magic mr-1"></i>生成状态变迁矩阵
       </button>
 
+      <button id="runPipeline"
+        class="w-full mt-3 bg-indigo-600 text-white py-2 rounded-md hover:bg-indigo-700">
+        <i class="fa fa-cogs mr-1"></i>运行全流程（含校验/图谱/矩阵）
+      </button>
+
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">
         <button id="saveMatrix"
           class="w-full bg-success text-white py-2 rounded-md hover:bg-success/90">
@@ -89,6 +94,14 @@
 
       <div id="resultContainer" class="text-secondary text-center py-10">
         点击左侧按钮生成矩阵
+      </div>
+
+      <div id="pipelineSummary" class="mt-6 hidden">
+        <h3 class="text-base font-semibold text-gray-800 mb-2">
+          <i class="fa fa-check-circle text-success mr-1"></i>全流程输出摘要
+        </h3>
+        <div id="pipelineReport" class="text-sm text-secondary"></div>
+        <div id="pipelineMatrices" class="mt-4 space-y-4"></div>
       </div>
     </div>
 
@@ -119,12 +132,16 @@
 const requirementDoc = document.getElementById('requirementDoc');
 const temperature = document.getElementById('temperature');
 const generateMatrix = document.getElementById('generateMatrix');
+const runPipeline = document.getElementById('runPipeline');
 const saveMatrix = document.getElementById('saveMatrix');
 const exportZipc = document.getElementById('exportZipc');
 
 const loading = document.getElementById('loading');
 const resultContainer = document.getElementById('resultContainer');
 const zipcMatrix = document.getElementById('zipcMatrix');
+const pipelineSummary = document.getElementById('pipelineSummary');
+const pipelineReport = document.getElementById('pipelineReport');
+const pipelineMatrices = document.getElementById('pipelineMatrices');
 
 function showError(msg) {
   resultContainer.innerHTML = `<div class="text-danger text-center">${msg}</div>`;
@@ -145,6 +162,7 @@ generateMatrix.onclick = async () => {
 
   loading.classList.remove('hidden');
   resultContainer.innerHTML = '';
+  pipelineSummary.classList.add('hidden');
 
   try {
     const res = await fetch('/api/generate-matrix', {
@@ -169,6 +187,63 @@ generateMatrix.onclick = async () => {
     }
     zipcMatrix.value = JSON.stringify(matrix, null, 2);
 
+  } catch (e) {
+    showError(e.message);
+  } finally {
+    loading.classList.add('hidden');
+  }
+};
+
+/* 全流程按钮 */
+runPipeline.onclick = async () => {
+  if (!requirementDoc.value.trim()) {
+    alert('请输入需求文档');
+    return;
+  }
+
+  loading.classList.remove('hidden');
+  resultContainer.innerHTML = '';
+  pipelineSummary.classList.add('hidden');
+
+  try {
+    const res = await fetch('/api/run-pipeline', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        requirementDoc: requirementDoc.value,
+        temperature: temperature.value
+      })
+    });
+
+    const result = await res.json();
+    if (result.code !== 200) throw new Error(result.msg);
+
+    const data = result.data || {};
+    const report = data.validation_report || {};
+    const reportHtml = `
+      <div>输出目录：${escapeHtml(data.output_dir || '')}</div>
+      <div>冲突数：${report.conflict_count || 0}，遗漏数：${report.missing_count || 0}</div>
+      <div>规则配置：${Object.values(data.rule_configs || {}).map(escapeHtml).join(', ')}</div>
+      <div>图谱文件：${escapeHtml(data.knowledge_graph_path || '')}</div>
+      <div>图谱图片：${escapeHtml(data.knowledge_graph_image || '')}</div>
+    `;
+    pipelineReport.innerHTML = reportHtml;
+
+    const matrices = data.seat_matrices || {};
+    pipelineMatrices.innerHTML = Object.entries(matrices).map(([name, payload]) => `
+      <div class="border rounded-md p-3 bg-gray-50">
+        <div class="font-medium text-gray-800 mb-2">${escapeHtml(name)}</div>
+        <div class="text-xs text-secondary mb-2">Markdown：${escapeHtml(payload.markdown_path || '')}</div>
+        <div class="text-xs text-secondary mb-2">Excel：${escapeHtml(payload.excel_path || '')}</div>
+      </div>
+    `).join('');
+
+    if (data.jsonc) {
+      renderSeatModel(data.jsonc);
+      zipcMatrix.value = JSON.stringify(data.jsonc, null, 2);
+    }
+
+    pipelineSummary.classList.remove('hidden');
   } catch (e) {
     showError(e.message);
   } finally {
