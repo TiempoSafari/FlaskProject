@@ -336,6 +336,63 @@ def _normalize_rule_dict(rule: Dict[str, Any]) -> Rule:
         correction=rule.get("correction"),
     )
 
+def load_base_rules(rule_path: str) -> List[Rule]:
+    """读取固定的 base_rules.conf，解析为 Rule 列表。"""
+    rules: List[Rule] = []
+    if not os.path.isfile(rule_path):
+        return rules
+
+    with open(rule_path, "r", encoding="utf-8") as handle:
+        content = handle.read()
+
+    blocks = [b.strip() for b in content.split("\n\n") if b.strip()]
+    for block in blocks:
+        lines = [line.strip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+        header = lines[0]
+        rule_id_match = re.search(r"\[(.+?)\]", header)
+        rule_id = rule_id_match.group(1) if rule_id_match else "C000"
+        rule_type = "冲突" if "类型:冲突" in header else "遗漏"
+        source_match = re.search(r"来源:([^\s]+)", header)
+        source = source_match.group(1) if source_match else "SEAT公理"
+        description_match = re.search(r"描述:([^\n]+)", header)
+        description = description_match.group(1).strip() if description_match else ""
+
+        condition: Dict[str, Any] = {}
+        correction: Dict[str, Any] = {}
+        in_condition = False
+        for line in lines[1:]:
+            if line.startswith("条件:"):
+                in_condition = True
+                continue
+            if line.startswith("判定:"):
+                in_condition = False
+                match = re.search(r"修正方案:(\{.*\})", line)
+                if match:
+                    try:
+                        correction = json.loads(match.group(1))
+                    except Exception:
+                        correction = {}
+                continue
+            if in_condition and "=" in line:
+                key, value = [part.strip() for part in line.split("=", 1)]
+                try:
+                    condition[key] = json.loads(value)
+                except Exception:
+                    condition[key] = value.strip("\"")
+
+        rules.append(Rule(
+            rule_id=rule_id,
+            rule_type=rule_type,
+            source=source,
+            description=description,
+            condition=condition,
+            correction=correction or None,
+        ))
+
+    return rules
+
 
 def generate_rules_with_llm(
     requirement_doc: str,
@@ -665,7 +722,10 @@ def run_full_pipeline(
     initial_kg = build_knowledge_graph(jsonc_data)
 
     # 2) 基于需求文档 + 知识图谱生成规则（由大模型生成，不再硬编码）
-    rules = generate_rules_with_llm(requirement_doc, initial_kg, llm_config or {})
+    base_rule_path = os.path.join(os.path.dirname(__file__), "rule_config", "base_rules.conf")
+    base_rules = load_base_rules(base_rule_path)
+    llm_rules = generate_rules_with_llm(requirement_doc, initial_kg, llm_config or {})
+    rules = base_rules + llm_rules
     rule_paths = write_rule_configs(rules, os.path.join(output_dir, "rule_config"))
 
     corrected_jsonc = jsonc_data
