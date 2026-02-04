@@ -298,7 +298,22 @@ def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
         else:
             edge_labels[(source, target)] = edge_type or ""
     nx.draw_networkx_edge_labels(graph, pos, edge_labels=edge_labels, font_size=7, font_family=font_family)
+    legend_lines = [
+        "边标签说明：",
+        "TRANSITION: event + A:actions",
+        "SELF: event + / (忽略) 或 × (非法)",
+        "CONTAIN: 复合状态包含子状态",
+    ]
     plt.axis("off")
+    plt.text(
+        0.01,
+        0.01,
+        "\n".join(legend_lines),
+        transform=plt.gca().transAxes,
+        fontsize=7,
+        verticalalignment="bottom",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.8),
+    )
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
