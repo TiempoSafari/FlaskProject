@@ -118,16 +118,21 @@ def build_knowledge_graph(jsonc_data: Dict[str, Any]) -> nx.DiGraph:
                     continue
                 target = cell.get("T") or SYMBOL_TRANSITION_STAY
                 actions = cell.get("A") or []
-                if target in (SYMBOL_TRANSITION_STAY, "null"):
-                    continue
+                cell_type = None
+                if SYMBOL_ACTION_ILLEGAL in actions:
+                    cell_type = "ILLEGAL"
+                elif SYMBOL_ACTION_NONE in actions:
+                    cell_type = "NOOP"
 
                 graph.add_edge(
                     f"State::{state_name}",
-                    f"State::{target}",
-                    type="TRANSITION",
+                    f"State::{target if target not in (SYMBOL_TRANSITION_STAY, 'null') else state_name}",
+                    type="TRANSITION" if target not in (SYMBOL_TRANSITION_STAY, "null") else "SELF",
                     table=table_name,
                     event=event_name,
                     actions=[a for a in actions if a not in (SYMBOL_ACTION_NONE, SYMBOL_ACTION_ILLEGAL)],
+                    cell_type=cell_type,
+                    transfer=target,
                 )
 
         # 3) CONTAIN：复合状态包含子状态
@@ -153,6 +158,8 @@ def summarize_knowledge_graph(graph: nx.DiGraph, limit: int = 200) -> Dict[str, 
     states = []
     transitions = []
     contains = []
+    noop_cells = []
+    illegal_cells = []
 
     for node, data in graph.nodes(data=True):
         if data.get("type") == "State":
@@ -175,18 +182,33 @@ def summarize_knowledge_graph(graph: nx.DiGraph, limit: int = 200) -> Dict[str, 
                 "actions": data.get("actions"),
                 "table": data.get("table"),
             })
+        elif edge_type == "SELF":
+            cell_summary = {
+                "state": source,
+                "event": data.get("event"),
+                "actions": data.get("actions"),
+                "table": data.get("table"),
+                "transfer": data.get("transfer"),
+                "cell_type": data.get("cell_type"),
+            }
+            if data.get("cell_type") == "ILLEGAL":
+                illegal_cells.append(cell_summary)
+            else:
+                noop_cells.append(cell_summary)
         elif edge_type == "CONTAIN":
             contains.append({
                 "parent": source,
                 "child": target,
             })
-        if len(transitions) + len(contains) >= limit:
+        if len(transitions) + len(contains) + len(noop_cells) + len(illegal_cells) >= limit:
             break
 
     return {
         "states": states,
         "transitions": transitions,
         "contains": contains,
+        "noop_cells": noop_cells,
+        "illegal_cells": illegal_cells,
         "node_count": graph.number_of_nodes(),
         "edge_count": graph.number_of_edges(),
     }
@@ -266,6 +288,11 @@ def visualize_knowledge_graph(graph: nx.DiGraph, output_path: str) -> None:
             actions = data.get("actions") or []
             action_text = ",".join(actions) if actions else "/"
             edge_labels[(source, target)] = f"{event}\nA:{action_text}"
+        elif edge_type == "SELF":
+            event = data.get("event") or ""
+            cell_type = data.get("cell_type") or "NOOP"
+            symbol = "×" if cell_type == "ILLEGAL" else "/"
+            edge_labels[(source, target)] = f"{event}\n{symbol}"
         elif edge_type == "CONTAIN":
             edge_labels[(source, target)] = "CONTAIN"
         else:
@@ -320,6 +347,9 @@ def generate_rules_with_llm(
   - TRANSITION：State -> State，表示状态转移。事件/动作作为边属性：
       - event：触发事件名称
       - actions：动作列表（已过滤“/”“×”）
+  - SELF：State -> State（自环），表示不转移的单元格（/ 或 ×）。属性：
+      - cell_type: NOOP（/）或 ILLEGAL（×）
+      - transfer: 原始 T 值（通常是 "-"）
   - CONTAIN：State -> State，表示复合状态包含子状态。
 3) 规则应利用图谱结构与需求文本进行一致性检查：
   - 冲突：与需求或图谱逻辑矛盾（例如同一状态+事件产生多个不同转移）。
@@ -330,6 +360,10 @@ def generate_rules_with_llm(
 
 【知识图谱摘要】
 {json.dumps(graph_summary, ensure_ascii=False)}
+
+【重点检查】
+1) illegal_cells（×）中的状态+事件是否确实是“不可能事件”。
+2) noop_cells（/）中的状态+事件是否确实应忽略且保持原状态。
 
 【输出要求】
 1) 仅输出 JSON 数组，不要 Markdown，不要解释。
